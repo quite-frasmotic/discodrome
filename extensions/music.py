@@ -9,6 +9,7 @@ from discord.ext import commands
 from random import randint 
 import data
 import copy
+import slsk
 import subsonic
 import ui
 from pagination import ListPaginator
@@ -160,7 +161,7 @@ class MusicCog(commands.Cog):
             await ctx.send("I am not connected to a voice channel.")
             return
 
-        if not voice_client.is_playing():
+        if not (voice_client.is_playing() or voice_client.is_paused()):
             await ctx.send("I am not currently playing anything.")
             return
 
@@ -207,7 +208,8 @@ class MusicCog(commands.Cog):
         options =  [
             "track",
             "album",
-            "playlist"
+            "playlist",
+            "soulseek"
         ]
         return [
             app_commands.Choice(name=option.capitalize(), value=option)
@@ -247,11 +249,52 @@ class MusicCog(commands.Cog):
             del choices[env.BOT_SEARCH_SUGGESTION_COUNT:]
         return choices
 
+    async def external_song(self, interaction: Interaction, query: str):
+        ''' Fetches "artist - song" from Soulseek (then YouTube). Returns a slsk.LocalSong, or None after
+        telling the user why there is none '''
+        try:
+            artist, title = slsk.parse_query(query)
+        except ValueError:
+            await ui.ErrMsg.msg(interaction, "Use the format **artist - song**.")
+            return None
+        if not slsk.enabled():
+            await ui.ErrMsg.msg(interaction, "Soulseek is not configured (SLSK_USER and SLSK_PASS are not set).")
+            return None
+        try:
+            song = await slsk.fetch_song(artist, title)
+        except Exception as e:
+            logger.error(f"Fetching {artist} - {title} from Soulseek/YouTube failed: {e}")
+            await ui.ErrMsg.msg(interaction, "Fetching the track failed and has been logged to console.")
+            return None
+        if song is None:
+            await ui.ErrMsg.msg(interaction, f"Nothing found on Soulseek or YouTube for **{artist} - {title}**.")
+        return song
+
+    async def find_track(self, interaction: Interaction, query: str, querytype: str=None):
+        ''' Finds one track: in the Subsonic library, else (query "artist - song") on Soulseek/YouTube.
+        Returns a Song or slsk.LocalSong, or None after telling the user why there is none '''
+        if querytype != "soulseek":
+            songs = (await subsonic.search(query, artist_count=0, album_count=0, song_count=1)).songs
+            if songs == "Error":
+                await ui.ErrMsg.msg(interaction, f"An api error has occurred and has been logged to console. Please contact an administrator.")
+                return None
+            if len(songs) > 0:
+                return songs[0]
+        try:
+            slsk.parse_query(query)
+            external = slsk.enabled() or querytype == "soulseek"
+        except ValueError:
+            external = querytype == "soulseek"
+        if not external:
+            await ui.ErrMsg.msg(interaction, f"No track found for **{query}**.")
+            return None
+        return await self.external_song(interaction, query)
+
     @app_commands.command(name="play", description="Plays a specified track, album or playlist")
-    @app_commands.describe(querytype="Whether what you're searching is a track, album or playlist", query="Enter a search query")
+    @app_commands.describe(querytype="Whether what you're searching is a track, album or playlist; soulseek searches Soulseek/YouTube", query="Enter a search query; for soulseek use: artist - song")
     @app_commands.autocomplete(querytype=play_querytype_autocomplete)
     @app_commands.autocomplete(query=play_query_autocomplete)
-    async def play(self, interaction: Interaction, querytype: str=None, query: str=None) -> None:
+    async def play(self, interaction: Interaction, query: str, querytype: str=None) -> None:
         ''' Play a track matching the given title/artist query '''
 
         # Check if user is in voice channel
@@ -259,49 +302,29 @@ class MusicCog(commands.Cog):
             await ui.ErrMsg.user_not_in_voice_channel(interaction)
             return
 
+        # A Soulseek/YouTube fetch can take over a minute; Discord wants an answer within 3 seconds
+        await interaction.response.defer()
+
         # Get a valid voice channel connection
         voice_client = await self.get_voice_client(interaction, should_connect=True)
 
         if voice_client is None:
             return
 
-        # Don't attempt playback if the bot is already playing
-        if voice_client.is_playing() and query is None:
-            await ui.ErrMsg.already_playing(interaction)
-            return
-
         # Get the guild's player
         player = data.guild_data(interaction.guild_id).player
         player.channel = interaction.channel
 
-        # Check queue if no query is provided
-        if query is None:
-
-            # Display error if queue is empty & autoplay is disabled
-            if player.queue == [] and data.guild_properties(interaction.guild_id).autoplay_mode == data.AutoplayMode.NONE:
-                await ui.ErrMsg.queue_is_empty(interaction)
-                return
-
-            # Begin playback of queue
-            await ui.SysMsg.starting_queue_playback(interaction)
-            await player.play_audio_queue(voice_client)
-            return
-
         # Check if the query is a track or empty (default to track search if empty)
-        if querytype == "track" or querytype == None:
+        if querytype == "track" or querytype == "soulseek" or querytype == None:
 
-            # Send our query to the subsonic API and retrieve a list of 1 song
-            songs = (await subsonic.search(query, artist_count=0, album_count=0, song_count=1)).songs
-            if songs == "Error":
-                await ui.ErrMsg.msg(interaction, f"An api error has occurred and has been logged to console. Please contact an administrator.")
+            song = await self.find_track(interaction, query, querytype)
+            if song is None:
                 return
+            songs = [song]
 
-            # Display an error if the query returned no results
-            if len(songs) == 0:
-                await ui.ErrMsg.msg(interaction, f"No track found for **{query}**.")
-                return
-            
-            # Add the first result to the queue and handle queue playback
+            # Add the first result to the queue; play_audio_queue below starts it right away when
+            # nothing is playing, otherwise it waits in the queue
             player.queue.append(songs[0])
 
             await ui.SysMsg.added_to_queue(interaction, songs[0])
@@ -371,24 +394,23 @@ class MusicCog(commands.Cog):
 
 
     @app_commands.command(name="next", description="Searches for a track and places it next in the queue")
-    @app_commands.describe(query="Enter a search query")
+    @app_commands.describe(query="Enter a search query; if the library has no match, use: artist - song to search Soulseek/YouTube")
     async def play_next(self, interaction: Interaction, query: str) -> None:
         ''' Search for a track and place it next in the queue '''
         # This is a duplication of efforts made in the normal play function.
         # TODO: Fix it.
 
+        # A Soulseek/YouTube fetch can take over a minute; Discord wants an answer within 3 seconds
+        await interaction.response.defer()
+
         voice_client = await self.get_voice_client(interaction, should_connect=True)
         player = data.guild_data(interaction.guild_id).player
 
-        songs = (await subsonic.search(query, artist_count=0, album_count=0, song_count=1)).songs
-        if songs == "Error":
-            await ui.ErrMsg.msg(interaction, f"An api error has occurred and has been logged to console. Please contact an administrator.")
+        song = await self.find_track(interaction, query)
+        if song is None:
             return
+        songs = [song]
 
-        if len(songs) == 0:
-            await ui.ErrMsg.msg(interaction, f"No track found for **{query}**.")
-            return
-  
         player.queue.insert(0,songs[0])
         await player.play_audio_queue(voice_client)
 
@@ -396,17 +418,10 @@ class MusicCog(commands.Cog):
 
 
 
-    @app_commands.command(name="stop", description="Stop playing the current track")
-    async def stop(self, interaction: Interaction) -> None:
-        ''' Disconnect from the active voice channel '''
+    @app_commands.command(name="pause", description="Pause the current track")
+    async def pause(self, interaction: Interaction) -> None:
+        ''' Pause playback; /resume continues from the same position '''
 
-        player = data.guild_data(interaction.guild_id).player
-
-        if player.current_song is None:
-            await ui.ErrMsg.not_playing(interaction)
-            return
-
-        # Get the voice client instance for the current guild
         voice_client = await self.get_voice_client(interaction)
 
         # Check if our voice client is connected
@@ -414,15 +429,44 @@ class MusicCog(commands.Cog):
             await ui.ErrMsg.bot_not_in_voice_channel(interaction)
             return
 
-        # Stop playback
-        player.stop(voice_client)
+        if voice_client.is_paused():
+            await ui.ErrMsg.msg(interaction, "Already paused.")
+            return
 
-        # Display disconnect confirmation
-        await ui.SysMsg.stopping_queue_playback(interaction)
+        if not voice_client.is_playing():
+            await ui.ErrMsg.not_playing(interaction)
+            return
 
-    @stop.error
-    async def stop_error(self, ctx, error):
-        logging.error(f"An error occurred while stopping playback: {error}")
+        voice_client.pause()
+        await ui.SysMsg.msg(interaction, f"Paused by {interaction.user.display_name}")
+
+    @pause.error
+    async def pause_error(self, ctx, error):
+        logging.error(f"An error occurred while pausing playback: {error}")
+        await ui.ErrMsg.msg(ctx, f"An unknown error has occurred and has been logged to console. Please contact an administrator. {error}")
+
+
+
+    @app_commands.command(name="resume", description="Resume the paused track")
+    async def resume(self, interaction: Interaction) -> None:
+        ''' Resume paused playback '''
+
+        voice_client = await self.get_voice_client(interaction)
+
+        if voice_client is None:
+            await ui.ErrMsg.bot_not_in_voice_channel(interaction)
+            return
+
+        if not voice_client.is_paused():
+            await ui.ErrMsg.msg(interaction, "Nothing is paused.")
+            return
+
+        voice_client.resume()
+        await ui.SysMsg.msg(interaction, f"Resumed by {interaction.user.display_name}")
+
+    @resume.error
+    async def resume_error(self, ctx, error):
+        logging.error(f"An error occurred while resuming playback: {error}")
         await ui.ErrMsg.msg(ctx, f"An unknown error has occurred and has been logged to console. Please contact an administrator. {error}")
 
 
@@ -494,8 +538,8 @@ class MusicCog(commands.Cog):
             await ui.ErrMsg.bot_not_in_voice_channel(interaction)
             return
 
-        # Check if the bot is playing music
-        if not voice_client.is_playing():
+        # Check if the bot is playing music (a paused track can be skipped too)
+        if not (voice_client.is_playing() or voice_client.is_paused()):
             await ui.ErrMsg.not_playing(interaction)
             return
 
@@ -542,7 +586,7 @@ class MusicCog(commands.Cog):
         logger.debug(f"Voice client: {voice_client}")
         if voice_client:
             logger.debug(f"Is playing: {voice_client.is_playing()}")
-        if voice_client is not None and not voice_client.is_playing():
+        if voice_client is not None and not voice_client.is_playing() and not voice_client.is_paused():
             player = data.guild_data(interaction.guild_id).player
             player.channel = interaction.channel
 

@@ -27,7 +27,8 @@ A Discord music bot that seamlessly streams music from your personal music serve
 | `/clear` | Clear the current queue |
 | `/shuffle` | Shuffle the current queue |
 | `/skip` | Skip the current track |
-| `/stop` | Stop playing the current track |
+| `/pause` | Pause the current track |
+| `/resume` | Resume the paused track |
 | `/autoplay` | Toggle autoplay |
 | `/playlists` | List available playlists |
 | `/playlist` | List songs in a playlist |

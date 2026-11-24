@@ -1,0 +1,9 @@
+services:
+  discodrome:
+    build: .
+    container_name: discodrome
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

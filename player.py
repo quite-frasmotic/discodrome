@@ -6,7 +6,8 @@ import discord
 import data
 import logging
 
-from subsonic import Song, APIError, get_random_songs, get_similar_songs, stream, get_album_art_file
+import slsk
+from subsonic import Song, APIError, get_random_songs, get_similar_songs, stream
 
 logger = logging.getLogger(__name__)
 
@@ -110,13 +111,21 @@ class Player():
         ffmpeg_options = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
                            "options": "-filter:a volume=replaygain=track"}
         try:
-            stream_url = await stream(song.song_id)
-            if not stream_url:
-                logger.error("Failed to get stream URL")
-                await self._send("Error", "Failed to get audio stream. Please try again.")
-                return
+            if slsk.is_local(song):
+                # fetched from Soulseek/YouTube: play the cached file
+                if not song.path.exists():
+                    await self._send("Error", f"**{song.title}** is no longer in the cache and was skipped.")
+                    await self.play_audio_queue(voice_client)
+                    return
+                audio_src = discord.FFmpegOpusAudio(str(song.path), options="-vn")
+            else:
+                stream_url = await stream(song.song_id)
+                if not stream_url:
+                    logger.error("Failed to get stream URL")
+                    await self._send("Error", "Failed to get audio stream. Please try again.")
+                    return
 
-            audio_src = discord.FFmpegOpusAudio(stream_url, **ffmpeg_options)
+                audio_src = discord.FFmpegOpusAudio(stream_url, **ffmpeg_options)
         except APIError as err:
             logger.error(f"API Error streaming song, Code {err.errorcode}: {err.message}")
             await self._send("Error", f"API error while streaming song: {err.message}")
@@ -228,8 +237,8 @@ class Player():
             await self._send("Error", "Not currently connected to a voice channel.")
             return
 
-        # Check if the bot is already playing something
-        if voice_client.is_playing():
+        # Check if the bot is already playing something (a paused track counts: it continues on /resume)
+        if voice_client.is_playing() or voice_client.is_paused():
             return
 
         # Check if the queue contains songs
@@ -237,15 +246,13 @@ class Player():
             # Pop the first item from the queue and stream the track
             song = self.queue.pop(0)
             self.current_song = song
-            cover_art = await get_album_art_file(song.cover_id)
-            desc = f"**{song.title}** - *{song.artist}*\n{song.album} ({song.duration_printable})"
-            await self._send("Now Playing:", desc, cover_art)
             await self.stream_track(song, voice_client)
         else:
             logger.debug("Queue is empty.")
             logger.debug("Current song: %s", self.current_song)
             if self.current_song is not None:
-                prev_song_id = self.current_song.song_id
+                # similar-song autoplay needs a Subsonic id; cached Soulseek/YouTube songs have none
+                prev_song_id = None if slsk.is_local(self.current_song) else self.current_song.song_id
                 self.current_song = None
             else:
                 prev_song_id = None
@@ -272,7 +279,7 @@ class Player():
             return
         logger.debug("Skipping track...")
         # Check if the bot is already playing something
-        if voice_client.is_playing():
+        if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
             await self._send("Skipped track")
         else:
