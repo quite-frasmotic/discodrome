@@ -98,6 +98,8 @@ class SysMsg:
     async def added_to_queue(interaction: discord.Interaction, song: Song) -> None:
         ''' Sends a message indicating the selected song was added to queue '''
         desc = f"**{song.title}** - *{song.artist}*\n{song.album} ({song.duration_printable})"
+        if song.quality:
+            desc += f"\n{song.quality}"
         cover_art = await get_album_art_file(song.cover_id)
         await __class__.msg(interaction, f"{interaction.user.display_name} added track to queue", desc, cover_art)
 

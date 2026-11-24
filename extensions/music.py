@@ -250,28 +250,23 @@ class MusicCog(commands.Cog):
         return choices
 
     async def external_song(self, interaction: Interaction, query: str):
-        ''' Fetches "artist - song" from Soulseek (then YouTube). Returns a slsk.LocalSong, or None after
+        ''' Fetches the search string from Soulseek (then YouTube). Returns a slsk.LocalSong, or None after
         telling the user why there is none '''
-        try:
-            artist, title = slsk.parse_query(query)
-        except ValueError:
-            await ui.ErrMsg.msg(interaction, "Use the format **artist - song**.")
-            return None
         if not slsk.enabled():
             await ui.ErrMsg.msg(interaction, "Soulseek is not configured (SLSK_USER and SLSK_PASS are not set).")
             return None
         try:
-            song = await slsk.fetch_song(artist, title)
+            song = await slsk.fetch_song(query)
         except Exception as e:
-            logger.error(f"Fetching {artist} - {title} from Soulseek/YouTube failed: {e}")
+            logger.error(f"Fetching {query} from Soulseek/YouTube failed: {e}")
             await ui.ErrMsg.msg(interaction, "Fetching the track failed and has been logged to console.")
             return None
         if song is None:
-            await ui.ErrMsg.msg(interaction, f"Nothing found on Soulseek or YouTube for **{artist} - {title}**.")
+            await ui.ErrMsg.msg(interaction, f"Nothing found on Soulseek or YouTube for **{query}**.")
         return song
 
     async def find_track(self, interaction: Interaction, query: str, querytype: str=None):
-        ''' Finds one track: in the Subsonic library, else (query "artist - song") on Soulseek/YouTube.
+        ''' Finds one track: in the Subsonic library, else the query is searched on Soulseek/YouTube as one string.
         Returns a Song or slsk.LocalSong, or None after telling the user why there is none '''
         if querytype != "soulseek":
             songs = (await subsonic.search(query, artist_count=0, album_count=0, song_count=1)).songs
@@ -280,18 +275,13 @@ class MusicCog(commands.Cog):
                 return None
             if len(songs) > 0:
                 return songs[0]
-        try:
-            slsk.parse_query(query)
-            external = slsk.enabled() or querytype == "soulseek"
-        except ValueError:
-            external = querytype == "soulseek"
-        if not external:
+        if not (slsk.enabled() or querytype == "soulseek"):
             await ui.ErrMsg.msg(interaction, f"No track found for **{query}**.")
             return None
         return await self.external_song(interaction, query)
 
     @app_commands.command(name="play", description="Plays a specified track, album or playlist")
-    @app_commands.describe(querytype="Whether what you're searching is a track, album or playlist; soulseek searches Soulseek/YouTube", query="Enter a search query; for soulseek use: artist - song")
+    @app_commands.describe(querytype="Whether what you're searching is a track, album or playlist; soulseek searches Soulseek/YouTube", query="Enter a search query; if the library has no match, it is searched on Soulseek/YouTube")
     @app_commands.autocomplete(querytype=play_querytype_autocomplete)
     @app_commands.autocomplete(query=play_query_autocomplete)
     async def play(self, interaction: Interaction, query: str, querytype: str=None) -> None:
@@ -394,7 +384,7 @@ class MusicCog(commands.Cog):
 
 
     @app_commands.command(name="next", description="Searches for a track and places it next in the queue")
-    @app_commands.describe(query="Enter a search query; if the library has no match, use: artist - song to search Soulseek/YouTube")
+    @app_commands.describe(query="Enter a search query; if the library has no match, it is searched on Soulseek/YouTube")
     async def play_next(self, interaction: Interaction, query: str) -> None:
         ''' Search for a track and place it next in the queue '''
         # This is a duplication of efforts made in the normal play function.
@@ -545,7 +535,9 @@ class MusicCog(commands.Cog):
 
         player = data.guild_data(interaction.guild_id).player
         player.channel = interaction.channel
-        await player.skip_track(voice_client)
+        await player.skip_track(voice_client, announce=False)
+        # answer the slash command itself (the channel message alone leaves it "not responding")
+        await ui.SysMsg.msg(interaction, f"Skipped by {interaction.user.display_name}")
 
     @skip.error
     async def skip_error(self, ctx, error):

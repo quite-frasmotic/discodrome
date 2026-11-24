@@ -19,11 +19,23 @@ class OwnerCog(commands.Cog):
     async def interaction_check(self, interaction: Interaction):
         return interaction.user.id == env.DISCORD_OWNER_ID
 
+    async def cog_app_command_error(self, interaction: Interaction, error: app_commands.AppCommandError):
+        ''' Answers the interaction when the owner check fails (otherwise Discord shows "did not respond") '''
+        if isinstance(error, app_commands.CheckFailure):
+            logger.warning("Owner command refused for user %s (DISCORD_OWNER_ID is %s)", interaction.user.id, env.DISCORD_OWNER_ID)
+            await interaction.response.send_message("Only the bot owner can use this command.", ephemeral=True)
+        else:
+            logger.error("Owner command failed: %s", error)
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Command failed: {error}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Command failed: {error}", ephemeral=True)
+
     @app_commands.command(name="sync", description="Sync slash commands")
     async def sync(self, interaction: Interaction):
+        await interaction.response.defer(ephemeral=True)
         await self.bot.sync_command_tree()
-        if (interaction.message is not None):
-            await interaction.message.reply("Commands synced")
+        await interaction.followup.send("Commands synced", ephemeral=True)
 
 async def setup(bot: DiscodromeClient):
     ''' Setup function for the owner.py cog '''

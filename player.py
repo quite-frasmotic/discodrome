@@ -6,6 +6,7 @@ import discord
 import data
 import logging
 
+import loudness
 import slsk
 from subsonic import Song, APIError, get_random_songs, get_similar_songs, stream
 
@@ -109,7 +110,7 @@ class Player():
 
         # Get the stream from the Subsonic server, using the provided song's ID
         ffmpeg_options = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-                           "options": "-filter:a volume=replaygain=track"}
+                           "options": f"-filter:a {loudness.stream_filter()}"}
         try:
             if slsk.is_local(song):
                 # fetched from Soulseek/YouTube: play the cached file
@@ -117,7 +118,7 @@ class Player():
                     await self._send("Error", f"**{song.title}** is no longer in the cache and was skipped.")
                     await self.play_audio_queue(voice_client)
                     return
-                audio_src = discord.FFmpegOpusAudio(str(song.path), options="-vn")
+                audio_src = discord.FFmpegOpusAudio(str(song.path), options=f"-vn -filter:a {loudness.file_filter(song.loudness)}")
             else:
                 stream_url = await stream(song.song_id)
                 if not stream_url:
@@ -270,7 +271,7 @@ class Player():
         self.current_song = None
         voice_client.stop()
 
-    async def skip_track(self, voice_client: discord.VoiceClient) -> None:
+    async def skip_track(self, voice_client: discord.VoiceClient, announce: bool=True) -> None:
         ''' Skips the current track and plays the next one in the queue '''
 
         # Check if the bot is connected to a voice channel; it's the caller's responsibility to open a voice channel
@@ -281,7 +282,8 @@ class Player():
         # Check if the bot is already playing something
         if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
-            await self._send("Skipped track")
+            if announce:
+                await self._send("Skipped track")
         else:
             await self._send("Error", "No track is playing.")
 

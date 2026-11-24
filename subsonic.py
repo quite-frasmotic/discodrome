@@ -93,6 +93,29 @@ class Song():
         self._artist: str = json_object["artist"] if "artist" in json_object else "Unknown Artist"
         self._cover_id: str = json_object["coverArt"] if "coverArt" in json_object else ""
         self._duration: int = json_object["duration"] if "duration" in json_object else 0
+        self._suffix: str = json_object.get("suffix") or ""
+        self._bitrate: int = json_object.get("bitRate") or 0
+        self._bit_depth: int = json_object.get("bitDepth") or 0
+        self._sampling_rate: int = json_object.get("samplingRate") or 0
+        self._channels: int = json_object.get("channelCount") or 0
+
+    @property
+    def quality(self) -> str:
+        ''' Audio quality of the file, e.g. "FLAC · 16-bit/44.1 kHz · 912 kbps" (empty when the server does not tell) '''
+        # getattr: queues pickled by older versions lack these attributes
+        parts = []
+        if getattr(self, "_suffix", ""):
+            parts.append(self._suffix.upper())
+        depth, rate = getattr(self, "_bit_depth", 0), getattr(self, "_sampling_rate", 0)
+        if depth and rate:
+            parts.append(f"{depth}-bit/{rate / 1000:g} kHz")
+        elif rate:
+            parts.append(f"{rate / 1000:g} kHz")
+        if getattr(self, "_bitrate", 0):
+            parts.append(f"{self._bitrate} kbps")
+        if getattr(self, "_channels", 0) == 1:
+            parts.append("mono")
+        return " · ".join(parts)
 
     @property
     def song_id(self) -> str:
